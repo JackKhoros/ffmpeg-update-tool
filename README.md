@@ -1,6 +1,37 @@
 # FFmpeg Auto-Updater for Windows (PowerShell)
 
-This repository contains a fully automatic FFmpeg updater for Windows.
-Place `update_ffmpeg.ps1` in the same folder as your FFmpeg binaries and run it.
+This repository contains a fully automatic FFmpeg updater for Windows.  
+It downloads the latest official FFmpeg build from the BtbN GitHub releases,
+verifies changes using ETag, and updates only when needed.
 
-See the main ChatGPT thread for the full detailed README.
+## Usage
+Place `update_ffmpeg.ps1` in the same folder as your FFmpeg binaries  
+(`ffmpeg.exe`, `ffprobe.exe`, `ffplay.exe`) and run the script:
+
+powershell -ExecutionPolicy Bypass -File .\update_ffmpeg.ps1
+
+The script will:
+- Check for the latest FFmpeg build (via ETag)
+- Avoid redundant downloads
+- Detect rate-limited throttled speeds and retry intelligently
+- Download the ZIP via curl.exe (fast mode)
+- Extract only the required binaries
+- Show detailed colorized progress bars and logs
+
+## Features
+- ⚡ **Fast download via curl (RAM/Direct ZIP modes)**
+- 🧠 **Intelligent retry when GitHub throttles bandwidth**
+- 🟣 **Beautiful colored progress bar**
+- 🔍 **Version comparison via `ffmpeg -version`**
+- 📦 **ZIP extraction without writing temp folders**
+- 🔄 **Only updates when a new build is available**
+- 🛡️ **Safe — never overwrites unrelated files**
+
+## Requirements
+- Windows 10/11
+- PowerShell 5+ (default)
+- curl.exe (bundled in Windows)
+
+---
+
+Enjoy the tool!
