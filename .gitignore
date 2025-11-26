@@ -1,0 +1,8 @@
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
+metadata.json
+ffmpeg-update.zip
+*.zip
+*.7z
+*.log
