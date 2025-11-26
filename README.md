@@ -8,10 +8,15 @@ verifies changes using ETag, and updates only when needed.
 Place `update_ffmpeg.ps1` in the same folder as your FFmpeg binaries  
 (`ffmpeg.exe`, `ffprobe.exe`, `ffplay.exe`) and run the script:
 
+```
 powershell -ExecutionPolicy Bypass -File "path\to\update_ffmpeg.ps1"
+```
 
-Replace path\to\update_ffmpeg.ps1 with the full path to your script, e.g.:
+Replace `path\to\update_ffmpeg.ps1` with the full path to your script, e.g.:
+
+```
 powershell -ExecutionPolicy Bypass -File "D:\Tools\ffmpeg\update_ffmpeg.ps1"
+```
 
 The script will:
 - Check for the latest FFmpeg build (via ETag)
