@@ -1,8 +1,11 @@
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-# FFmpeg Updater v8-public — works in the folder where update_ffmpeg.ps1 is located
+# FFmpeg Updater v8.5.1 вЂ” works in the folder where update_ffmpeg.ps1 is located
 
 $ErrorActionPreference = "Stop"
+
+$script:SpeedThresholdMBps = 0.0
+
 
 # Determine script directory (works in PowerShell 5.1/7+)
 $root = $PSScriptRoot
@@ -16,8 +19,10 @@ if (-not $root -or $root -eq "") {
 $metaFile = Join-Path $root "metadata.json"
 $zipPath  = Join-Path $root "ffmpeg-update.zip"
 
-$assetName = "ffmpeg-master-latest-win64-gpl.zip"
-$apiUrl    = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+$assetName      = "ffmpeg-master-latest-win64-gpl.zip"
+$altMasterPattern = "ffmpeg-N-*-win64-gpl.zip"
+$apiLatestUrl   = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+$apiReleasesUrl = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=10"
 
 # ----- Pretty helpers -----
 
@@ -51,7 +56,7 @@ function Draw-Progress {
     if ($pct -gt 1) { $pct = 1 }
     $filled = [int]($pct * $len)
     if ($pct -gt 0 -and $pct -lt 1 -and $filled -lt 1) {
-        $filled = 1  # всегда хотя бы один "=" при ненулевом прогрессе
+        $filled = 1  # РІСЃРµРіРґР° С…РѕС‚СЏ Р±С‹ РѕРґРёРЅ "=" РїСЂРё РЅРµРЅСѓР»РµРІРѕРј РїСЂРѕРіСЂРµСЃСЃРµ
     }
     $empty  = $len - $filled
     if ($empty -lt 0) { $empty = 0 }
@@ -82,9 +87,48 @@ function Draw-Progress {
     Write-Host -NoNewline $totText -ForegroundColor Blue
     Write-Host -NoNewline " MB @ " -ForegroundColor White
 
-    Write-Host -NoNewline $spdText -ForegroundColor Green
+    if ($script:SpeedThresholdMBps -gt 0 -and $speedMB -gt 0 -and $speedMB -lt $script:SpeedThresholdMBps) {
+        Write-Host -NoNewline $spdText -ForegroundColor DarkRed
+    } else {
+        Write-Host -NoNewline $spdText -ForegroundColor Green
+    }
     Write-Host -NoNewline " MB/s" -ForegroundColor White
 }
+
+function Get-ExpectedSha256FromChecksums {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$AssetName
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    $lines = Get-Content -Path $Path -ErrorAction Stop
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+
+        # Each line has the form:
+        # <sha256>  <filename>
+        $parts = $trimmed -split "\s+", 2
+        if ($parts.Count -lt 2) { continue }
+
+        $hash = $parts[0]
+        $name = $parts[1]
+
+        if ($name -eq $AssetName) {
+            return $hash
+        }
+    }
+
+    return $null
+}
+
+
 
 # ----- Load old metadata -----
 
@@ -113,19 +157,162 @@ if (Test-Path $ffmpegPath) {
 }
 
 try {
-    Write-Status "CHECK" "Checking GitHub API..."
+    # Script version
+$ScriptVersion = "v8.5.1"
 
-    $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "PowerShell" }
-    $asset   = $release.assets | Where-Object { $_.name -eq $assetName }
+Write-Host "==============================================="
+Write-Host (" FFmpeg Updater {0}" -f $ScriptVersion) -ForegroundColor Cyan
+Write-Host "==============================================="
+Write-Host ""
+
+Write-Status "CHECK" "Checking GitHub API..."
+
+    $headers = @{ "User-Agent" = "PowerShell" }
+
+    $release       = $null
+    $asset         = $null
+    $releases      = $null
+    $latestRelease = $null
+    $latestAsset   = $null
+    $newest        = $null
+    $newestAsset   = $null
+    $usingNonStandardAssetName = $false
+
+    function Get-MasterAssetFromRelease {
+        param(
+            [Parameter(Mandatory = $true)]
+            $Rel
+        )
+
+        if (-not $Rel -or -not $Rel.assets) {
+            return $null
+        }
+
+        # 1) Try canonical master asset name first
+        $std = $Rel.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
+        if ($std) {
+            return $std
+        }
+
+        # 2) Try snapshot-style master name (e.g. ffmpeg-N-121951-g7043522fe0-win64-gpl.zip)
+        $alt = $Rel.assets | Where-Object { $_.name -like $altMasterPattern } | Select-Object -First 1
+        if ($alt) {
+            return $alt
+        }
+
+        return $null
+    }
+
+    try {
+        # 1) Query a page of releases and find the newest one that contains a master build (standard or snapshot name)
+        $releases = Invoke-RestMethod -Uri $apiReleasesUrl -Headers $headers
+
+        if ($releases) {
+            $candidates = @()
+
+            foreach ($rel in $releases) {
+                $candidateAsset = Get-MasterAssetFromRelease -Rel $rel
+                if ($candidateAsset) {
+                    $candidates += [PSCustomObject]@{
+                        Release = $rel
+                        Asset   = $candidateAsset
+                    }
+                }
+            }
+
+            if ($candidates.Count -gt 0) {
+                $selected = $candidates |
+                    Sort-Object -Property { [DateTime]$_.Release.published_at } -Descending |
+                    Select-Object -First 1
+
+                $newest      = $selected.Release
+                $newestAsset = $selected.Asset
+            }
+        }
+    } catch {
+        # Ignore errors here; we'll try /latest below if needed
+    }
+
+    try {
+        # 2) Also query /releases/latest (GitHub's idea of "latest") and look for master there
+        $latestRelease = Invoke-RestMethod -Uri $apiLatestUrl -Headers $headers
+        if ($latestRelease) {
+            $latestAsset = Get-MasterAssetFromRelease -Rel $latestRelease
+        }
+    } catch {
+        # Ignore; if this fails, we'll just use whatever we got from the releases list
+    }
+
+    # 3) Decide which release to use
+    if ($newest -and $newestAsset -and $latestRelease -and $latestAsset) {
+        $newestDate = [DateTime]$newest.published_at
+        $latestDate = [DateTime]$latestRelease.published_at
+
+        if ($latestDate -ge $newestDate) {
+            $release = $latestRelease
+            $asset   = $latestAsset
+        } else {
+            $release = $newest
+            $asset   = $newestAsset
+        }
+    } elseif ($newest -and $newestAsset) {
+        $release = $newest
+        $asset   = $newestAsset
+    } elseif ($latestRelease -and $latestAsset) {
+        $release = $latestRelease
+        $asset   = $latestAsset
+    } elseif ($latestRelease) {
+        # Fallback: try to use /latest with the canonical name only
+        if ($latestRelease.assets) {
+            $asset = $latestRelease.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
+            if ($asset) {
+                $release = $latestRelease
+            }
+        }
+    }
+
     if (-not $asset) {
-        Write-Host "Asset not found: $assetName" -ForegroundColor Red
+        Write-Host "Asset not found: $assetName (or snapshot pattern $altMasterPattern)" -ForegroundColor Red
         return
+    }
+
+    # Detect if the selected master asset uses a non-standard name
+    $usingNonStandardAssetName = $asset.name -ne $assetName
+    if ($usingNonStandardAssetName) {
+        # [INFO] prefix styled like Write-Status (white brackets, yellow tag)
+        Write-Host "[" -NoNewline -ForegroundColor White
+        Write-Host "INFO" -NoNewline -ForegroundColor Yellow
+        Write-Host "] " -NoNewline -ForegroundColor White
+
+        # Emphasize the descriptive part of the message in bright yellow,
+        # but keep the package name in the same yellow as INFO/CHECK tags.
+        Write-Host "Using master asset with non-standard name: " -NoNewline -ForegroundColor Yellow
+        Write-Host $asset.name -ForegroundColor Yellow
     }
 
     $buildDate   = $asset.updated_at
     $downloadUrl = $asset.browser_download_url
 
-    Write-Status "CHECK" "Fetching ETag and file size..."
+    # Log which release/tag we are using
+    $releaseTag = $null
+    if ($release -and $release.tag_name) {
+        $releaseTag = $release.tag_name
+    } elseif ($release -and $release.name) {
+        $releaseTag = $release.name
+    } else {
+        $releaseTag = "latest"
+    }
+
+    $publishedAt = $null
+    if ($release -and $release.published_at) {
+        $publishedAt = [string]$release.published_at
+    } else {
+        $publishedAt = "unknown"
+    }
+
+    Write-Status "CHECK" ("Selected build: {0} (published {1})" -f $releaseTag, $publishedAt)
+
+Write-Status "CHECK" "Fetching ETag and file size..."
 
     $head       = Invoke-WebRequest -Uri $downloadUrl -Method Head -Headers @{ "User-Agent"="PowerShell" }
     $etag       = $head.Headers.ETag
@@ -155,6 +342,52 @@ try {
         return
     }
 
+    # ----- Optional SHA256 checksum preparation -----
+    $checksumAvailable = $false
+    $expectedSha256    = $null
+
+    $checksumAsset = $null
+    if ($release -and $release.assets) {
+        $checksumAsset = $release.assets | Where-Object { $_.name -eq "checksums.sha256" } | Select-Object -First 1
+    }
+
+    if ($checksumAsset) {
+        try {
+            $checksumPath = Join-Path $root "checksums.sha256"
+            if (Test-Path $checksumPath) {
+                Remove-Item $checksumPath -Force -ErrorAction SilentlyContinue
+            }
+
+            Invoke-WebRequest -Uri $checksumAsset.browser_download_url -OutFile $checksumPath -Headers @{ "User-Agent" = "PowerShell" }
+
+            $expectedSha256 = Get-ExpectedSha256FromChecksums -Path $checksumPath -AssetName $asset.name
+
+            Remove-Item $checksumPath -Force -ErrorAction SilentlyContinue
+
+            if ($expectedSha256) {
+                $checksumAvailable = $true
+            } else {
+                Write-Host "[" -NoNewline -ForegroundColor White
+                Write-Host "WARN" -NoNewline -ForegroundColor Yellow
+                Write-Host "] " -NoNewline -ForegroundColor White
+                Write-Host ("SHA256 entry not found for asset {0} in checksums.sha256. Skipping integrity validation." -f $asset.name) -ForegroundColor Yellow
+            }
+        } catch {
+            if (Test-Path $checksumPath) {
+                Remove-Item $checksumPath -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "[" -NoNewline -ForegroundColor White
+            Write-Host "WARN" -NoNewline -ForegroundColor Yellow
+            Write-Host "] " -NoNewline -ForegroundColor White
+            Write-Host "Failed to download or parse checksums.sha256. Skipping SHA256 validation." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[" -NoNewline -ForegroundColor White
+        Write-Host "WARN" -NoNewline -ForegroundColor Yellow
+        Write-Host "] " -NoNewline -ForegroundColor White
+        Write-Host "SHA256 checksum file (checksums.sha256) is missing for this release. Skipping integrity validation." -ForegroundColor Yellow
+    }
+
     Write-Status "ETAG" "Remote ETag differs from local." "NEW"
     Write-Host ""
     Write-Status "DL" "Starting download to ZIP via curl.exe (fast mode)..."
@@ -164,6 +397,7 @@ try {
     }
 
     $thresholdMBps = 1.0
+    $script:SpeedThresholdMBps = $thresholdMBps
     $sampleBytes   = 3MB
     if ($totalBytes -gt 0 -and $sampleBytes -gt $totalBytes) {
         $sampleBytes = [int64]($totalBytes / 4)
@@ -328,67 +562,125 @@ try {
         return $result
     }
 
-    # ----- Run download with possible retry -----
+    # ----- Run download with possible retry (speed + SHA256) -----
 
-    $downloadOk = $false
+    $maxIntegrityAttempts = 2
+    $integrityAttempt     = 0
+    $downloadOk           = $false
 
-    $firstResult = Invoke-DownloadToFile -url $downloadUrl -zipPath $zipPath -totalBytes $totalBytes -attempt 1 -thresholdMBps $thresholdMBps -sampleBytes $sampleBytes
+    while ($integrityAttempt -lt $maxIntegrityAttempts) {
+        $integrityAttempt++
 
-    if ($firstResult.AbortedByUser) {
-        Write-Host ""
-        Write-Host $firstResult.ErrorMessage -ForegroundColor Red
-        return
-    }
+        $firstResult = Invoke-DownloadToFile -url $downloadUrl -zipPath $zipPath -totalBytes $totalBytes -attempt 1 -thresholdMBps $thresholdMBps -sampleBytes $sampleBytes
 
-    if ($firstResult.Success -and -not $firstResult.WasSlow) {
-        $downloadOk = $true
-    } else {
-        Write-Host ""
-        Write-Host "First attempt was slow or failed: $($firstResult.ErrorMessage)" -ForegroundColor Yellow
-        Write-Host "Retrying download (attempt 2)..." -ForegroundColor Yellow
-
-        $secondResult = Invoke-DownloadToFile -url $downloadUrl -zipPath $zipPath -totalBytes $totalBytes -attempt 2 -thresholdMBps $thresholdMBps -sampleBytes $sampleBytes
-
-        if ($secondResult.AbortedByUser) {
+        if ($firstResult.AbortedByUser) {
             Write-Host ""
-            Write-Host $secondResult.ErrorMessage -ForegroundColor Red
+            Write-Host $firstResult.ErrorMessage -ForegroundColor Red
             return
         }
 
-        if (-not $secondResult.Success) {
+        if ($firstResult.Success -and -not $firstResult.WasSlow) {
+            $downloadOk = $true
+        } else {
             Write-Host ""
-            Write-Host "Second attempt failed: $($secondResult.ErrorMessage)" -ForegroundColor Red
+            Write-Host "First attempt was slow or failed: $($firstResult.ErrorMessage)" -ForegroundColor Yellow
+            Write-Host "Retrying download (attempt 2)..." -ForegroundColor Yellow
+
+            $secondResult = Invoke-DownloadToFile -url $downloadUrl -zipPath $zipPath -totalBytes $totalBytes -attempt 2 -thresholdMBps $thresholdMBps -sampleBytes $sampleBytes
+
+            if ($secondResult.AbortedByUser) {
+                Write-Host ""
+                Write-Host $secondResult.ErrorMessage -ForegroundColor Red
+                return
+            }
+
+            if (-not $secondResult.Success) {
+                Write-Host ""
+                Write-Host "Second attempt failed: $($secondResult.ErrorMessage)" -ForegroundColor Red
+                return
+            }
+
+            $downloadOk = $true
+        }
+
+        if (-not $downloadOk) {
+            Write-Host "Download failed." -ForegroundColor Red
             return
         }
 
-        $downloadOk = $true
-    }
-
-    if (-not $downloadOk) {
-        Write-Host "Download failed." -ForegroundColor Red
-        return
-    }
-
-    if (-not (Test-Path $zipPath)) {
-        Write-Host "Download failed: ZIP file not found." -ForegroundColor Red
-        return
-    }
-
-    if ($totalBytes -gt 0) {
-        $zipLen = (Get-Item $zipPath).Length
-        if ($zipLen -ne $totalBytes) {
-            Write-Host ""
-            Write-Host ("Error: downloaded size ({0:N1} MB) does not match expected Content-Length ({1:N1} MB)." -f ($zipLen/1MB), ($totalBytes/1MB)) -ForegroundColor Red
-            Write-Host "Archive appears incomplete or corrupted. Please try again later." -ForegroundColor Red
-            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $zipPath)) {
+            Write-Host "Download failed: ZIP file not found." -ForegroundColor Red
             return
         }
+
+        if ($totalBytes -gt 0) {
+            $zipLen = (Get-Item $zipPath).Length
+            if ($zipLen -ne $totalBytes) {
+                Write-Host ""
+                Write-Host ("Error: downloaded size ({0:N1} MB) does not match expected size ({1:N1} MB)." -f ($zipLen/1MB), ($totalBytes/1MB)) -ForegroundColor Red
+                Write-Host "Archive appears incomplete or corrupted. Please try again later." -ForegroundColor Red
+                Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+                return
+            }
+        }
+
+        # Optional SHA256 validation
+        if ($checksumAvailable -and $expectedSha256) {
+            try {
+                $fileHash      = Get-FileHash -Algorithm SHA256 -Path $zipPath
+                $actualSha256  = $fileHash.Hash.ToLowerInvariant()
+                $expectedLower = $expectedSha256.ToLowerInvariant()
+                $hashesMatch   = ($actualSha256 -eq $expectedLower)
+
+                # Report HASH status with explicit PASS/FAIL
+                Write-Host "[" -NoNewline -ForegroundColor White
+                Write-Host "HASH" -NoNewline -ForegroundColor Yellow
+                Write-Host "] " -NoNewline -ForegroundColor White
+                Write-Host "Verifying SHA256 checksum..." -NoNewline -ForegroundColor White
+
+                if (-not $hashesMatch) {
+                    Write-Host " NOT PASSED" -ForegroundColor Red
+                    Write-Host ""
+                    Write-Host "[" -NoNewline -ForegroundColor White
+                    Write-Host "ERROR" -NoNewline -ForegroundColor Red
+                    Write-Host "] " -NoNewline -ForegroundColor White
+                    Write-Host "SHA256 checksum mismatch! The downloaded file is corrupt." -ForegroundColor Red
+
+                    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+
+                    if ($integrityAttempt -lt $maxIntegrityAttempts) {
+                        Write-Host "[" -NoNewline -ForegroundColor White
+                        Write-Host "INFO" -NoNewline -ForegroundColor Yellow
+                        Write-Host "] " -NoNewline -ForegroundColor White
+                        Write-Host "Retrying download due to SHA256 mismatch..." -ForegroundColor White
+                        continue
+                    } else {
+                        Write-Host "[" -NoNewline -ForegroundColor White
+                        Write-Host "ERROR" -NoNewline -ForegroundColor Red
+                        Write-Host "] " -NoNewline -ForegroundColor White
+                        Write-Host "SHA256 checksum mismatch on second attempt. Update aborted." -ForegroundColor Red
+                        return
+                    }
+                } else {
+                    Write-Host " PASSED" -ForegroundColor Green
+                }
+            } catch {
+                Write-Host "[" -NoNewline -ForegroundColor White
+                Write-Host "WARN" -NoNewline -ForegroundColor Yellow
+                Write-Host "] " -NoNewline -ForegroundColor White
+                Write-Host "Failed to compute SHA256 for the downloaded file. Skipping integrity validation." -ForegroundColor Yellow
+            }
+        }
+
+        # If we reach here, download and (optional) SHA256 validation succeeded
+        break
     }
 
     Write-Host ""
     Write-Status "ZIP" "Archive downloaded to file successfully." "OK"
 
-    # ----- Unzip from file -----
+
+# ----- Unzip from file -----
 
     Write-Status "UNZIP" "Extracting ffmpeg/ffprobe/ffplay from archive..."
 
@@ -415,6 +707,13 @@ try {
             if (-not $entry) {
                 throw "Entry matching pattern '$pattern' not found in archive."
             }
+
+            # Ensure Explorer and the filesystem see a real replacement:
+            # delete old file (if it exists) before creating the new one.
+            if (Test-Path $destPath) {
+                Remove-Item $destPath -Force
+            }
+
             $inStream  = $entry.Open()
             $outStream = [System.IO.File]::Create($destPath)
             try {
@@ -463,6 +762,14 @@ try {
             }
         } catch {
             $newVersionLine = $null
+        }
+    }
+
+    if ($oldVersionLine -and $newVersionLine) {
+        if ($oldVersionLine -ne $newVersionLine) {
+            Write-Status "CHECK" "ffmpeg -version changed after update." "OK"
+        } else {
+            Write-Status "CHECK" "ffmpeg -version did not change after update (version line is the same as before)." ""
         }
     }
 
