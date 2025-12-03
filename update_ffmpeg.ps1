@@ -1,6 +1,6 @@
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-# FFmpeg Updater v8.5.1 вЂ” works in the folder where update_ffmpeg.ps1 is located
+# FFmpeg Updater v8.6.1 вЂ” works in the folder where update_ffmpeg.ps1 is located
 
 $ErrorActionPreference = "Stop"
 
@@ -10,10 +10,11 @@ $script:SpeedThresholdMBps = 0.0
 # Determine script directory (works in PowerShell 5.1/7+)
 $root = $PSScriptRoot
 if (-not $root -or $root -eq "") {
-    $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-}
-if (-not $root -or $root -eq "") {
-    $root = (Get-Location).Path
+    if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.Path) {
+        $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+    } else {
+        $root = (Get-Location).Path
+    }
 }
 
 $metaFile = Join-Path $root "metadata.json"
@@ -73,10 +74,10 @@ function Draw-Progress {
 
     Write-Host -NoNewline "[" -ForegroundColor White
     if ($barFill.Length -gt 0) {
-        Write-Host -NoNewline $barFill -ForegroundColor Magenta
+        Write-Host -NoNewline $barFill -ForegroundColor White
     }
     if ($barEmpty.Length -gt 0) {
-        Write-Host -NoNewline $barEmpty -ForegroundColor DarkGray
+        Write-Host -NoNewline $barEmpty -ForegroundColor White
     }
     Write-Host -NoNewline "] " -ForegroundColor White
 
@@ -107,18 +108,29 @@ function Get-ExpectedSha256FromChecksums {
         return $null
     }
 
-    $lines = Get-Content -Path $Path -ErrorAction Stop
+    # checksums.sha256 in BtbN/FFmpeg-Builds is plain ASCII/UTF-8 without BOM.
+    # Read as UTF8 explicitly so PowerShell does not guess a wider encoding.
+    $lines = Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
+
     foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
         $trimmed = $line.Trim()
         if (-not $trimmed) { continue }
 
         # Each line has the form:
-        # <sha256>  <filename>
+        #   <sha256>  <filename>
+        # Split into two parts: hash and filename.
         $parts = $trimmed -split "\s+", 2
-        if ($parts.Count -lt 2) { continue }
+        if ($parts.Count -ne 2) { continue }
 
-        $hash = $parts[0]
-        $name = $parts[1]
+        $hash = $parts[0].Trim()
+        $name = $parts[1].Trim()
+
+        # Some checksum formats prefix filenames with "*" (binary mode).
+        if ($name.StartsWith("*")) {
+            $name = $name.Substring(1).Trim()
+        }
 
         if ($name -eq $AssetName) {
             return $hash
@@ -127,8 +139,6 @@ function Get-ExpectedSha256FromChecksums {
 
     return $null
 }
-
-
 
 # ----- Load old metadata -----
 
@@ -158,7 +168,7 @@ if (Test-Path $ffmpegPath) {
 
 try {
     # Script version
-$ScriptVersion = "v8.5.1"
+$ScriptVersion = "v8.6.1"
 
 Write-Host "==============================================="
 Write-Host (" FFmpeg Updater {0}" -f $ScriptVersion) -ForegroundColor Cyan
@@ -327,19 +337,40 @@ Write-Status "CHECK" "Fetching ETag and file size..."
     }
 
     if ($old.etag -eq $etag) {
-        Write-Host ""
-        Write-Host "FFmpeg is already up to date. (ETag match)" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "ETag: " -NoNewline -ForegroundColor Red
-        Write-Host $old.etag -ForegroundColor Cyan
-        Write-Host "Build date: " -NoNewline -ForegroundColor White
-        Write-Host $old.build_date -ForegroundColor Magenta
-        if ($oldVersionLine) {
+        $ffmpegPath  = Join-Path $root "ffmpeg.exe"
+        $ffprobePath = Join-Path $root "ffprobe.exe"
+        $ffplayPath  = Join-Path $root "ffplay.exe"
+
+        $required = @(
+            @{ Name = "ffmpeg.exe";  Path = $ffmpegPath  },
+            @{ Name = "ffprobe.exe"; Path = $ffprobePath },
+            @{ Name = "ffplay.exe";  Path = $ffplayPath  }
+        )
+
+        $missing = $required | Where-Object { -not (Test-Path $_.Path) }
+
+        if ($missing.Count -eq 0) {
             Write-Host ""
-            Write-Host "Current FFmpeg: " -NoNewline -ForegroundColor White
-            Write-Host $oldVersionLine -ForegroundColor Green
+            Write-Host "FFmpeg is already up to date. (ETag match)" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "ETag: " -NoNewline -ForegroundColor Red
+            Write-Host $old.etag -ForegroundColor Cyan
+            Write-Host "Build date: " -NoNewline -ForegroundColor White
+            Write-Host $old.build_date -ForegroundColor Magenta
+            if ($oldVersionLine) {
+                Write-Host ""
+                Write-Host "Current FFmpeg: " -NoNewline -ForegroundColor White
+                Write-Host $oldVersionLine -ForegroundColor Green
+            }
+            return
         }
-        return
+
+        $missingNames = ($missing | ForEach-Object { $_.Name }) -join ", "
+        Write-Host "[" -NoNewline -ForegroundColor White
+        Write-Host "WARN" -NoNewline -ForegroundColor Yellow
+        Write-Host "] " -NoNewline -ForegroundColor White
+        Write-Host ("ETag matches but required binaries are missing: {0}. Re-downloading..." -f $missingNames) -ForegroundColor Yellow
+        # Fall through to download logic
     }
 
     # ----- Optional SHA256 checksum preparation -----
@@ -392,6 +423,14 @@ Write-Status "CHECK" "Fetching ETag and file size..."
     Write-Host ""
     Write-Status "DL" "Starting download to ZIP via curl.exe (fast mode)..."
 
+    $curlCmd = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+    if (-not $curlCmd) {
+        Write-Host "curl.exe not found on PATH. Please install or restore curl.exe (it is bundled with modern Windows)." -ForegroundColor Red
+        return
+    }
+    $curlPath = $curlCmd.Source
+
+
     if ($totalBytes -le 0) {
         Write-Host "Warning: Content-Length not provided. Progress bar may be inaccurate." -ForegroundColor Yellow
     }
@@ -437,9 +476,10 @@ Write-Status "CHECK" "Fetching ETag and file size..."
         $buffer = New-Object byte[] 65536
 
         $psi                        = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName               = "curl.exe"
-        $psi.Arguments              = "--silent --http1.1 -L `"$url`""
+        $psi.FileName               = $curlPath
+        $psi.Arguments              = "--silent --show-error --fail-with-body --http1.1 -L `"$url`""
         $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
         $psi.UseShellExecute        = $false
         $psi.CreateNoWindow         = $true
 
@@ -534,9 +574,19 @@ Write-Status "CHECK" "Fetching ETag and file size..."
             return $result
         }
 
+        $errText = ""
+        try {
+            $errText = $proc.StandardError.ReadToEnd().Trim()
+        } catch {
+            $errText = ""
+        }
+
         if ($proc.ExitCode -ne 0) {
             Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
             $result.ErrorMessage = "curl exited with code $($proc.ExitCode)."
+            if (-not [string]::IsNullOrWhiteSpace($errText)) {
+                $result.ErrorMessage += " Details: $errText"
+            }
             return $result
         }
 
