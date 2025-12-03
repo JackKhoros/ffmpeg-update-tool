@@ -1,5 +1,35 @@
 # Changelog
 
+## v8.6.1 – 2025-12-03
+### Added / Changed
+- Improved script-root detection:
+  - still prefers `$PSScriptRoot`,
+  - falls back to `$MyInvocation.MyCommand.Path` when available,
+  - finally falls back to the current working directory.
+- Progress bar line now uses white characters (both filled and empty segments), matching the rest of the console text.
+- Expanded handling of master assets with non-standard names:
+  - the label “Using master asset with non-standard name:” keeps normal formatting,
+  - the actual filename is now highlighted in bright yellow.
+- Curl invocation is now fully standardized:
+  - the script resolves `curl.exe` only once via `Get-Command`,
+  - prints a red error and aborts cleanly if curl is not found,
+  - always uses consistent flags (`--silent --show-error --fail-with-body --http1.1 -L`),
+  - stderr is captured and included in error messages after failed downloads.
+- Strengthened ETag fast-path check:
+  - if ETag matches but any of the required binaries (`ffmpeg.exe`, `ffprobe.exe`, `ffplay.exe`) are missing,
+    the script prints a yellow warning and re-downloads the build instead of aborting early.
+- SHA256 implementation updated:
+  - more robust parser for `checksums.sha256`,
+  - supports filenames with optional leading `*`,
+  - trims whitespace and handles UTF-8 input cleanly.
+- `[HASH] Verifying SHA256 checksum…` now prints result on the same line:
+  - `PASSED` in bright green,
+  - `NOT PASSED` in bright red.
+
+### Fixed
+- Cleaned up minor formatting inconsistencies in status/output messages.
+- Improved internal cleanup logic during repeated failed integrity checks.
+
 ## v8.5.1 — 2025-12-02
 ### Added / Changed
 - SHA256 verification step now displays a clear result on the same line:
