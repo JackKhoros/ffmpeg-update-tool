@@ -22,8 +22,8 @@ The script will:
 - Check for the latest FFmpeg build (via ETag)
 - Avoid redundant downloads
 - Detect rate-limited throttled speeds and retry intelligently
-- Download the ZIP via curl.exe (fast mode)
-- Extract only the required binaries
+- Download the ZIP via curl.exe (fast mode) to `ffmpeg-update.zip` in the current directory
+- Remove the downloaded archive after extracting only the required binaries
 - Show detailed colorized progress bars and logs
 
 ## Features
