@@ -6,22 +6,34 @@ verifies changes using ETag, and updates only when needed.
 The script works with both Windows PowerShell 5.1 (`powershell`) and PowerShell 7+ (`pwsh`).  
 If you have PowerShell 7 installed, using `pwsh` is recommended (no legacy security prompts, better future compatibility).
 
+### PowerShell Compatibility
+
+The script works with both:
+
+* **Windows PowerShell 5.1** — use `powershell`
+* **PowerShell 7+ (pwsh)** — recommended for best compatibility and no security prompts introduced in recent Windows updates
+
+If you have PowerShell 7 installed, running the updater using `pwsh` is strongly recommended.
+
 ## Usage
-Place `update_ffmpeg.ps1` in the same folder as your FFmpeg binaries  
+
+Place `update_ffmpeg.ps1` in the same folder as your FFmpeg binaries
 (`ffmpeg.exe`, `ffprobe.exe`, `ffplay.exe`) and run the script:
 
-```
+```powershell
 # Windows PowerShell 5.1
 powershell -ExecutionPolicy Bypass -File "path\to\update_ffmpeg.ps1"
+```
 
+```powershell
 # PowerShell 7+ (recommended)
 pwsh -ExecutionPolicy Bypass -File "path\to\update_ffmpeg.ps1"
 ```
 
-Replace `path\to\update_ffmpeg.ps1` with the full path to your script, e.g.:
+Replace `"path\to\update_ffmpeg.ps1"` with the actual path to your script, e.g.:
 
 ```
-powershell -ExecutionPolicy Bypass -File "D:\Tools\ffmpeg\update_ffmpeg.ps1"
+pwsh -ExecutionPolicy Bypass -File "D:\Tools\ffmpeg\update_ffmpeg.ps1"
 ```
 
 The script will:
