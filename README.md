@@ -3,13 +3,19 @@
 This repository contains a fully automatic FFmpeg updater for Windows.  
 It downloads the latest official FFmpeg build from the BtbN GitHub releases,
 verifies changes using ETag, and updates only when needed.
+The script works with both Windows PowerShell 5.1 (`powershell`) and PowerShell 7+ (`pwsh`).  
+If you have PowerShell 7 installed, using `pwsh` is recommended (no legacy security prompts, better future compatibility).
 
 ## Usage
 Place `update_ffmpeg.ps1` in the same folder as your FFmpeg binaries  
 (`ffmpeg.exe`, `ffprobe.exe`, `ffplay.exe`) and run the script:
 
 ```
+# Windows PowerShell 5.1
 powershell -ExecutionPolicy Bypass -File "path\to\update_ffmpeg.ps1"
+
+# PowerShell 7+ (recommended)
+pwsh -ExecutionPolicy Bypass -File "path\to\update_ffmpeg.ps1"
 ```
 
 Replace `path\to\update_ffmpeg.ps1` with the full path to your script, e.g.:
