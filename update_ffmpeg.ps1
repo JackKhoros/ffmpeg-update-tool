@@ -1,10 +1,23 @@
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-# FFmpeg Updater v8.6.1 вЂ” works in the folder where update_ffmpeg.ps1 is located
+# FFmpeg Updater v8.6.2 — works in the folder where update_ffmpeg.ps1 is located
 
 $ErrorActionPreference = "Stop"
 
 $script:SpeedThresholdMBps = 0.0
+
+# Detect if Invoke-WebRequest supports -UseBasicParsing (Windows PowerShell 5.1)
+$Script:UseBasicParsing = $false
+try {
+    $iwCmd = Get-Command Invoke-WebRequest -ErrorAction SilentlyContinue
+    if ($iwCmd -and $iwCmd.Parameters.ContainsKey('UseBasicParsing')) {
+        $Script:UseBasicParsing = $true
+    }
+} catch {
+    $Script:UseBasicParsing = $false
+}
+
+
 
 
 # Determine script directory (works in PowerShell 5.1/7+)
@@ -57,7 +70,7 @@ function Draw-Progress {
     if ($pct -gt 1) { $pct = 1 }
     $filled = [int]($pct * $len)
     if ($pct -gt 0 -and $pct -lt 1 -and $filled -lt 1) {
-        $filled = 1  # РІСЃРµРіРґР° С…РѕС‚СЏ Р±С‹ РѕРґРёРЅ "=" РїСЂРё РЅРµРЅСѓР»РµРІРѕРј РїСЂРѕРіСЂРµСЃСЃРµ
+        $filled = 1  # always show at least one "=" when progress is non-zero
     }
     $empty  = $len - $filled
     if ($empty -lt 0) { $empty = 0 }
@@ -168,7 +181,7 @@ if (Test-Path $ffmpegPath) {
 
 try {
     # Script version
-$ScriptVersion = "v8.6.1"
+$ScriptVersion = "v8.6.2"
 
 Write-Host "==============================================="
 Write-Host (" FFmpeg Updater {0}" -f $ScriptVersion) -ForegroundColor Cyan
@@ -324,12 +337,25 @@ Write-Status "CHECK" "Checking GitHub API..."
 
 Write-Status "CHECK" "Fetching ETag and file size..."
 
-    $head       = Invoke-WebRequest -Uri $downloadUrl -Method Head -Headers @{ "User-Agent"="PowerShell" }
-    $etag       = $head.Headers.ETag
-    $totalBytes = 0
-    if ($head.Headers.'Content-Length') {
-        [int64]$totalBytes = $head.Headers.'Content-Length'
+    if ($Script:UseBasicParsing) {
+        $head = Invoke-WebRequest -Uri $downloadUrl -Method Head -Headers @{ "User-Agent" = "PowerShell" } -UseBasicParsing -ErrorAction Stop
+    } else {
+        $head = Invoke-WebRequest -Uri $downloadUrl -Method Head -Headers @{ "User-Agent" = "PowerShell" } -ErrorAction Stop
     }
+
+    $etagHeader = $head.Headers["ETag"]
+    if ($etagHeader) {
+        $etag = ($etagHeader | Select-Object -First 1)
+    } else {
+        $etag = $null
+    }
+
+    $totalBytes = 0
+    $lenHeader  = $head.Headers["Content-Length"]
+    if ($lenHeader) {
+        [int64]$totalBytes = ($lenHeader | Select-Object -First 1)
+    }
+
 
     if (-not $etag) {
         Write-Host "Error: GitHub did not return an ETag." -ForegroundColor Red
@@ -389,7 +415,12 @@ Write-Status "CHECK" "Fetching ETag and file size..."
                 Remove-Item $checksumPath -Force -ErrorAction SilentlyContinue
             }
 
-            Invoke-WebRequest -Uri $checksumAsset.browser_download_url -OutFile $checksumPath -Headers @{ "User-Agent" = "PowerShell" }
+            if ($Script:UseBasicParsing) {
+                Invoke-WebRequest -Uri $checksumAsset.browser_download_url -OutFile $checksumPath -Headers @{ "User-Agent" = "PowerShell" } -UseBasicParsing
+            } else {
+                Invoke-WebRequest -Uri $checksumAsset.browser_download_url -OutFile $checksumPath -Headers @{ "User-Agent" = "PowerShell" }
+            }
+
 
             $expectedSha256 = Get-ExpectedSha256FromChecksums -Path $checksumPath -AssetName $asset.name
 
